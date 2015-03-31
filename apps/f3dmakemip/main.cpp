@@ -51,6 +51,7 @@
 #include <Field3D/MIPUtil.h>
 #include <Field3D/PatternMatch.h>
 #include <Field3D/SparseField.h>
+#include <Field3D/Resample.h>
 
 //----------------------------------------------------------------------------//
 
@@ -69,6 +70,7 @@ struct Options {
   string         outputFile;
   vector<string> names;
   vector<string> attributes;
+  string         filter;
   int            minRes;
   size_t         numThreads;
 };
@@ -122,6 +124,7 @@ Options parseOptions(int argc, char **argv)
     ("name,n", po::value<vector<string> >(), "Load field(s) by name")
     ("attribute,a", po::value<vector<string> >(), "Load field(s) by attribute")
     ("min-res,m", po::value<int>(), "Smallest MIP level to produce.")
+    ("filter,f", po::value<string>(), "Filter (box|triangle|gaussian|mitchell)")
     ("num-threads,t", po::value<size_t>(), "Number of threads to use")
     ("output-file,o", po::value<string>(), "Output file")
     ;
@@ -169,6 +172,9 @@ Options parseOptions(int argc, char **argv)
   if (vm.count("attribute")) {
     options.attributes = vm["attribute"].as<std::vector<std::string> >();
   }
+  if (vm.count("filter")) {
+    options.filter = vm["filter"].as<std::string>();
+  }
   if (vm.count("output-file")) {
     options.outputFile = vm["output-file"].as<std::string>();
   }
@@ -209,18 +215,32 @@ void makeMIP(typename Field<Data_T>::Ptr field, const Options &options,
 
   // Handle dense fields
   if (DenseType *dense = dynamic_cast<DenseType*>(field.get())) {
-    typename MIPDenseField<Data_T>::Ptr mip = 
-      makeMIP<MIPDenseField<Data_T> >(*dense, options.minRes, 
-                                      options.numThreads);
+    typename MIPDenseField<Data_T>::Ptr mip;
+    if (options.filter == "mitchell") {
+      mip = makeMIP<MIPDenseField<Data_T>, MitchellFilter>(*dense, options.minRes, options.numThreads);
+    } else if (options.filter == "gaussian") {
+      mip = makeMIP<MIPDenseField<Data_T>, GaussianFilter>(*dense, options.minRes, options.numThreads);
+    } else if (options.filter == "triangle") {
+      mip = makeMIP<MIPDenseField<Data_T>, TriangleFilter>(*dense, options.minRes, options.numThreads);
+    } else {
+      mip = makeMIP<MIPDenseField<Data_T>, BoxFilter>(*dense, options.minRes, options.numThreads);
+    }
     writeField<Data_T>(mip, out);
     return;
   }
 
   // Handle sparse fields
   if (SparseType *sparse = dynamic_cast<SparseType*>(field.get())) {
-    typename MIPSparseField<Data_T>::Ptr mip = 
-      makeMIP<MIPSparseField<Data_T> >(*sparse, options.minRes, 
-                                       options.numThreads);
+    typename MIPSparseField<Data_T>::Ptr mip;
+    if (options.filter == "mitchell") {
+      mip = makeMIP<MIPSparseField<Data_T>, MitchellFilter>(*sparse, options.minRes, options.numThreads);
+    } else if (options.filter == "gaussian") {
+      mip = makeMIP<MIPSparseField<Data_T>, GaussianFilter>(*sparse, options.minRes, options.numThreads);
+    } else if (options.filter == "triangle") {
+      mip = makeMIP<MIPSparseField<Data_T>, TriangleFilter>(*sparse, options.minRes, options.numThreads);
+    } else {
+      mip = makeMIP<MIPSparseField<Data_T>, BoxFilter>(*sparse, options.minRes, options.numThreads);
+    }
     writeField<Data_T>(mip, out);
     return;
   }

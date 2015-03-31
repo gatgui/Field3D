@@ -5,3 +5,8 @@ install/*
 
 *.dblite
 *.pyc
+
+.build/
+release/
+debug/
+excons.cache
