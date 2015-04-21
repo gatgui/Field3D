@@ -10,7 +10,7 @@ from excons.tools import dl
 
 defs = []
 
-static = (excons.GetArgument("static", 0, int) != 0)
+static = (excons.GetArgument("field3d-static", 0, int) != 0)
 if static:
    defs.append("FIELD3D_STATIC")
 
@@ -26,7 +26,7 @@ if extra_ns:
 
 verbose = (excons.GetArgument("verbose", 0, int) != 0)
 
-headers = glob.glob("export/*.h")
+headers = map(lambda x: x.replace("\\", "/"), glob.glob("export/*.h"))
 headers.remove("export/Types.h")
 
 targets = [
@@ -38,7 +38,7 @@ targets = [
     "install": {"include/Field3D": headers},
     "custom": [hdf5.Require(hl=False, verbose=verbose),
                ilmbase.Require(ilmthread=False, iexmath=False),
-               boost.Require(libs=["system", "thread"]),
+               boost.Require(libs=["system", "regex", "thread"]),
                dl.Require]},
    {"name": "f3dinfo",
     "type": "program",
@@ -58,7 +58,7 @@ targets = [
     "srcs": ["apps/f3dmakemip/main.cpp"],
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
-               boost.Require(libs=["program_options", "system", "thread"]),
+               boost.Require(libs=["program_options", "system", "regex", "thread"]),
                dl.Require]},
    {"name": "f3dsample",
     "type": "program",
@@ -68,7 +68,7 @@ targets = [
     "srcs": ["apps/f3dsample/main.cpp"],
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
-               boost.Require(libs=["program_options", "system"]),
+               boost.Require(libs=["program_options", "system", "regex"]),
                dl.Require]}
 ]
 

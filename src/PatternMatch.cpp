@@ -45,7 +45,7 @@
 #include "PatternMatch.h"
 
 // System includes
-#include <fnmatch.h>
+#include <boost/regex.hpp>
 
 //----------------------------------------------------------------------------//
 
@@ -54,6 +54,19 @@ FIELD3D_NAMESPACE_OPEN
 //----------------------------------------------------------------------------//
 // Function implementations
 //----------------------------------------------------------------------------//
+
+std::string& globToRegex(std::string &e)
+{
+  // escape regex special characters but for '?'' and '*'
+  // leave '[' range ']' in place 
+  // replace '?'' by .
+  // replace '*'' by .*?
+  static const boost::regex re("([?])|([*])|(\\[.-.\\])|([][{}().+|^$])");
+
+  e = boost::regex_replace(e, re, "(?1.)(?2.*?)(?3$3)(?4\\$4)", boost::match_default | boost::format_all);
+
+  return e;
+}
 
 std::vector<std::string> 
 split(const std::string &s)
@@ -103,7 +116,7 @@ match(const std::string &name, const std::string &attribute,
     // Check exclusion string
     bool isExclusion = i[0] == '-' || i[0] == '^';
     // Update string
-    const std::string pattern = isExclusion ? i.substr(1) : i;
+    std::string pattern = isExclusion ? i.substr(1) : i;
 
     // String to match
     std::string s;
@@ -118,7 +131,8 @@ match(const std::string &name, const std::string &attribute,
     }
     
     // Match with wildcards
-    if (fnmatch(pattern.c_str(), s.c_str(), FNM_NOESCAPE) == 0) {
+    boost::regex re(globToRegex(pattern), boost::regex::normal | boost::regex::no_except);
+    if (boost::regex_match(s, re)) {
       if (isExclusion) {
         foundExclusion = true;
       } else {
@@ -173,7 +187,8 @@ match(const std::string &attribute, const std::vector<std::string> &patterns,
     } 
     
     // Match with wildcards
-    if (fnmatch(pattern.c_str(), attribute.c_str(), FNM_NOESCAPE) == 0) {
+    boost::regex re(globToRegex(pattern), boost::regex::normal | boost::regex::no_except );
+    if (boost::regex_match(attribute, re)) {
       if (isExclusion) {
         foundExclusion = true;
       } else {
