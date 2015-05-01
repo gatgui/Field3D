@@ -297,6 +297,8 @@ template <class Data_T>
 typename DenseField<Data_T>::Ptr 
 DenseFieldIO::readData(hid_t dataSet, const Box3i &extents, const Box3i &dataW)
 {
+  GlobalLock lock(g_hdf5Mutex);
+  
   typename DenseField<Data_T>::Ptr field(new DenseField<Data_T>);
   field->setSize(extents, dataW);
 
