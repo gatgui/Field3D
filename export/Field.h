@@ -88,7 +88,7 @@ DECLARE_FIELD3D_GENERIC_EXCEPTION(ResizeException, Exception)
   for the metadata map
 */
 
-class FIELD3D_API FieldBase : public RefBase
+class FIELD3D_API FieldBase : public RefBase, public MetadataCallback
 {
 public:
 
@@ -152,17 +152,12 @@ public:
   //! \{
 
   //! accessor to the m_metadata class
-  FieldMetadata<FieldBase>& metadata()
+  FieldMetadata& metadata()
   { return m_metadata; }
 
   //! Read only access to the m_metadata class
-  const FieldMetadata<FieldBase>& metadata() const
+  const FieldMetadata& metadata() const
   { return m_metadata; }
-
-  //! This function should implemented by concrete classes to  
-  //! get the callback when metadata changes
-  virtual void metadataHasChanged(const std::string &/* name */) 
-  { /* Empty */ }
 
   //! Copies the metadata from a second field
   void copyMetadata(const FieldBase &field)
@@ -182,7 +177,7 @@ public:
   // Private data members ------------------------------------------------------
 
   //! metadata
-  FieldMetadata<FieldBase> m_metadata;
+  FieldMetadata m_metadata;
 
 };
 
@@ -1127,15 +1122,21 @@ inline Box3d continuousBounds(const Box3i &bbox)
 
 //----------------------------------------------------------------------------//
 
+//! Converts a floating point bounding box to an integer bounding box.
+//! \note If the float-to-int conversion overflows, the result is
+//! set to be std::numeric_limits<int>::max()
 inline Box3i discreteBounds(const Box3d &bbox)
 {
+  using std::floor;
+  using std::ceil;
+
   Box3i result;
-  result.min.x = static_cast<int>(std::floor(bbox.min.x));
-  result.min.y = static_cast<int>(std::floor(bbox.min.y));
-  result.min.z = static_cast<int>(std::floor(bbox.min.z));
-  result.max.x = static_cast<int>(std::ceil(bbox.max.x));
-  result.max.y = static_cast<int>(std::ceil(bbox.max.y));
-  result.max.z = static_cast<int>(std::ceil(bbox.max.z));
+  result.min.x = static_cast<int>(floor(clampForType<double, int>(bbox.min.x)));
+  result.min.y = static_cast<int>(floor(clampForType<double, int>(bbox.min.y)));
+  result.min.z = static_cast<int>(floor(clampForType<double, int>(bbox.min.z)));
+  result.max.x = static_cast<int>(ceil(clampForType<double, int>(bbox.max.x)));
+  result.max.y = static_cast<int>(ceil(clampForType<double, int>(bbox.max.y)));
+  result.max.z = static_cast<int>(ceil(clampForType<double, int>(bbox.max.z)));
   return result;
 }
 

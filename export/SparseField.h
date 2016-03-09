@@ -568,7 +568,7 @@ public:
   //! Internal function to create a Reference for the current field,
   //! for use in dynamic reading.
   void addReference(const std::string &filename, const std::string &layerPath,
-                    int valuesPerBlock, int occupiedBlocks);
+                    int valuesPerBlock, int numVoxels, int occupiedBlocks);
   //! Internal function to setup the Reference's block pointers, for
   //! use with dynamic reading.
   void setupReferenceBlocks();
@@ -675,11 +675,24 @@ typedef SparseField<V3d>    SparseField3d;
 template <typename Data_T>
 Box3i blockCoords(const Box3i &dvsBounds, const SparseField<Data_T> *f)
 {
+  // Check empty bbox input
+  if (!continuousBounds(dvsBounds).hasVolume()) {
+    return Box3i();
+  }
+  // Discrete offset voxel space
+  Box3i dovsBounds = dvsBounds;
+  f->applyDataWindowOffset(dovsBounds.min.x, 
+                           dovsBounds.min.y, 
+                           dovsBounds.min.z);
+  f->applyDataWindowOffset(dovsBounds.max.x, 
+                           dovsBounds.max.y, 
+                           dovsBounds.max.z);
+  // Discrete block space bounds
   Box3i dbsBounds;
   if (f) {
-    f->getBlockCoord(dvsBounds.min.x, dvsBounds.min.y, dvsBounds.min.z,
+    f->getBlockCoord(dovsBounds.min.x, dovsBounds.min.y, dovsBounds.min.z,
                      dbsBounds.min.x, dbsBounds.min.y, dbsBounds.min.z);
-    f->getBlockCoord(dvsBounds.max.x, dvsBounds.max.y, dvsBounds.max.z,
+    f->getBlockCoord(dovsBounds.max.x, dovsBounds.max.y, dovsBounds.max.z,
                      dbsBounds.max.x, dbsBounds.max.y, dbsBounds.max.z);
   } 
   return dbsBounds;
@@ -1336,6 +1349,7 @@ SparseField<Data_T>::copySparseField(const SparseField<Data_T> &o)
       m_fileManager->reference<Data_T>(o.m_fileId);
     addReference(oldReference->filename, oldReference->layerPath,
                  oldReference->valuesPerBlock,
+                 oldReference->numVoxels, 
                  oldReference->occupiedBlocks);
     copyBlockStates(o);
     setupReferenceBlocks();
@@ -1365,6 +1379,7 @@ template <class Data_T>
 void SparseField<Data_T>::addReference(const std::string &filename,
                                        const std::string &layerPath,
                                        int valuesPerBlock,
+                                       int numVoxels, 
                                        int occupiedBlocks)
 {
   m_fileManager = &SparseFileManager::singleton();
@@ -1373,6 +1388,7 @@ void SparseField<Data_T>::addReference(const std::string &filename,
   SparseFile::Reference<Data_T> *reference =
     m_fileManager->reference<Data_T>(m_fileId);
   reference->valuesPerBlock = valuesPerBlock;
+  reference->numVoxels = numVoxels;
   reference->occupiedBlocks = occupiedBlocks;
   reference->setNumBlocks(m_numBlocks);
 }
@@ -1401,6 +1417,19 @@ void SparseField<Data_T>::setupReferenceBlocks()
   SparseFile::Reference<Data_T> *reference =
     m_fileManager->reference<Data_T>(m_fileId);
 
+#if F3D_NO_BLOCKS_ARRAY
+  std::vector<int>::iterator fb = reference->fileBlockIndices.begin();
+  reference->blocks = m_blocks;
+  int nextBlockIdx = 0;
+  for (size_t i = 0; i < m_numBlocks; ++i, ++fb) {
+    if (m_blocks[i].isAllocated) {
+      *fb = nextBlockIdx;
+      nextBlockIdx++;
+    } else {
+      *fb = -1;
+    }
+  }
+#else
   std::vector<int>::iterator fb = reference->fileBlockIndices.begin();
   typename SparseFile::Reference<Data_T>::BlockPtrs::iterator bp =
     reference->blocks.begin();
@@ -1414,6 +1443,7 @@ void SparseField<Data_T>::setupReferenceBlocks()
       *fb = -1;
     }
   }
+#endif
 }
 
 //----------------------------------------------------------------------------//

@@ -269,7 +269,9 @@ void printFileInfo(const std::string &filename, const Options &options)
     exit(1);
   }
 
-  cout << "Field3D file: " << filename << endl;
+  cout << "Field3D file: " << filename << endl
+       << "  Encoding: " << endl
+       << "    " << in.encoding() << endl;
 
   vector<string> partitions;
   in.getPartitionNames(partitions);
@@ -336,7 +338,7 @@ void printFileInfo(const std::string &filename, const Options &options)
 
     }
   }
-
+  
   cout << "  Global metadata" << endl;
 
   cout << "    Int metadata:" << endl;

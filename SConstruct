@@ -6,6 +6,7 @@ from excons.tools import hdf5
 from excons.tools import ilmbase
 from excons.tools import boost
 from excons.tools import dl
+from excons.tools import zlib
 
 # FIELD3D_STATIC
 
@@ -38,13 +39,14 @@ targets = [
    {"name": "Field3D",
     "type": "staticlib" if static else "sharedlib",
     "defs": defs,
-    "incdirs": ["export"],
+    "incdirs": ["export", "include"],
     "srcs": glob.glob("src/*.cpp"),
     "libs": libs,
     "install": {"include/Field3D": headers},
     "custom": [hdf5.Require(hl=False, verbose=verbose),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["system", "thread"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dinfo",
     "type": "program",
@@ -55,6 +57,7 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dmakemip",
     "type": "program",
@@ -65,6 +68,7 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex", "thread"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dsample",
     "type": "program",
@@ -75,6 +79,7 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex"]),
+               zlib.Require,
                dl.Require]}
 ]
 

@@ -46,6 +46,9 @@
 // files
 #include "SparseField.h"
 
+#include "OgIO.h"
+#include "OgSparseDataReader.h"
+
 //----------------------------------------------------------------------------//
 
 FIELD3D_NAMESPACE_OPEN
@@ -110,7 +113,12 @@ int64_t SparseFileManager::deallocateBlock(const SparseFile::CacheBlock &cb)
   // Note: this lock order is made consistent w/ allocate to prevent
   // deadlocks and crashes.
 
+#if F3D_SHORT_MUTEX_ARRAY
+  boost::mutex::scoped_lock 
+    lock_B(reference->blockMutex[cb.blockIdx % reference->blockMutexSize]);
+#else
   boost::mutex::scoped_lock lock_B(reference->blockMutex[cb.blockIdx]);
+#endif
   
   // check whether the block is still in use
   if (reference->refCounts[cb.blockIdx] > 0)
@@ -428,6 +436,193 @@ void SparseFileManager::resetCacheStatistics()
     m_fileData.ref<V3d>(i)->resetCacheStatistics();
   }
 }
+
+//----------------------------------------------------------------------------//
+
+long long int SparseFileManager::memSize() const
+{
+  boost::mutex::scoped_lock lock(m_mutex);
+
+  return sizeof(*this) + m_fileData.memSize() + 
+    m_blockCacheList.size() * sizeof(SparseFile::CacheBlock);
+}
+
+//----------------------------------------------------------------------------//
+
+long long int SparseFile::FileReferences::memSize() const 
+{
+  Mutex::scoped_lock lock(m_mutex);
+
+  long long int size = 0;
+
+  // Size of the std::deque's
+  size += m_hRefs.size() * sizeof(Reference<half>::Ptr);
+  size += m_vhRefs.size() * sizeof(Reference<V3h>::Ptr);
+  size += m_fRefs.size() * sizeof(Reference<float>::Ptr);
+  size += m_vfRefs.size() * sizeof(Reference<V3f>::Ptr);
+  size += m_dRefs.size() * sizeof(Reference<double>::Ptr);
+  size += m_vdRefs.size() * sizeof(Reference<V3d>::Ptr);
+
+  // Size of the references themselves
+  for (size_t i = 0, end = m_hRefs.size(); i < end; ++i) {
+    size += m_hRefs[i]->memSize();
+  }
+  for (size_t i = 0, end = m_vhRefs.size(); i < end; ++i) {
+    size += m_vhRefs[i]->memSize();
+  }
+  for (size_t i = 0, end = m_fRefs.size(); i < end; ++i) {
+    size += m_fRefs[i]->memSize();
+  }
+  for (size_t i = 0, end = m_vfRefs.size(); i < end; ++i) {
+    size += m_vfRefs[i]->memSize();
+  }
+  for (size_t i = 0, end = m_dRefs.size(); i < end; ++i) {
+    size += m_dRefs[i]->memSize();
+  }
+  for (size_t i = 0, end = m_vdRefs.size(); i < end; ++i) {
+    size += m_vdRefs[i]->memSize();
+  }
+  
+  return size;
+}
+
+//----------------------------------------------------------------------------//
+// Template implementations
+//----------------------------------------------------------------------------//
+
+namespace SparseFile {
+
+//----------------------------------------------------------------------------//
+
+template <class Data_T>
+void Reference<Data_T>::loadBlock(int blockIdx)
+{
+  boost::mutex::scoped_lock lock(m_mutex);
+
+  // Allocate the block
+#if F3D_NO_BLOCKS_ARRAY
+  blocks[blockIdx].resize(numVoxels);
+  assert(blocks[blockIdx].data != NULL);
+  // Read the data
+  assert(m_reader || m_ogReader);
+  if (m_reader) {
+    m_reader->readBlock(fileBlockIndices[blockIdx], *blocks[blockIdx].data);
+  } else {
+    m_ogReader->readBlock(fileBlockIndices[blockIdx], blocks[blockIdx].data);
+  }
+  // Mark block as loaded
+  blockLoaded[blockIdx] = 1;
+  // Track count
+  m_numActiveBlocks++;
+#else
+  blocks[blockIdx]->resize(numVoxels);
+  assert(blocks[blockIdx]->data != NULL);
+  // Read the data
+  assert(m_reader || m_ogReader);
+  if (m_reader) {
+    m_reader->readBlock(fileBlockIndices[blockIdx], *blocks[blockIdx]->data);
+  } else {
+    m_ogReader->readBlock(fileBlockIndices[blockIdx], blocks[blockIdx]->data);
+  }
+  // Mark block as loaded
+  blockLoaded[blockIdx] = 1;
+  // Track count
+  m_numActiveBlocks++;
+#endif
+}
+
+//----------------------------------------------------------------------------//
+
+template <class Data_T>
+void Reference<Data_T>::openFile()
+{
+  using namespace Exc;
+  using namespace Hdf5Util;
+
+  boost::mutex::scoped_lock lock_A(m_mutex);
+
+  // check that the file wasn't already opened before obtaining the lock
+  if (fileIsOpen()) {
+    return;
+  }
+
+  // First try Ogawa ---
+
+  m_ogArchive.reset(new Alembic::Ogawa::IArchive(filename));
+  if (m_ogArchive->isValid()) {
+    m_ogRoot.reset(new OgIGroup(*m_ogArchive));
+    m_ogLayerGroup.reset(new OgIGroup(m_ogRoot->findGroup(layerPath)));
+    if (m_ogLayerGroup->isValid()) {
+      // Allocate the reader
+      m_ogReaderPtr.reset(new OgSparseDataReader<Data_T>(*m_ogLayerGroup,
+                                                         numVoxels,
+                                                         occupiedBlocks,
+                                                         true));
+      m_ogReader = m_ogReaderPtr.get();
+      // Done
+      return;
+    }
+  }
+
+  // Then, try HDF5 ---
+
+  {
+    // Hold the global lock
+    GlobalLock lock(g_hdf5Mutex);
+    // Open the file
+    m_fileHandle = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (m_fileHandle >= 0) {
+      // Open the layer group
+      m_layerGroup.open(m_fileHandle, layerPath.c_str());
+      if (m_layerGroup.id() < 0) {
+        Msg::print(Msg::SevWarning, "In SparseFile::Reference::openFile: "
+                   "Couldn't find layer group " + layerPath + 
+                   " in .f3d file ");
+        throw FileIntegrityException(filename);
+      }
+    } else {
+      Msg::print(Msg::SevWarning, "In SparseFile::Reference::openFile: "
+                 "Couldn't open HDF5 file ");
+      throw NoSuchFileException(filename);
+    }
+  }
+
+  // Re-allocate reader
+  if (m_reader) {
+    delete m_reader;
+  }
+  m_reader = new SparseDataReader<Data_T>(m_layerGroup.id(), 
+                                          valuesPerBlock, 
+                                          occupiedBlocks);
+}
+
+//----------------------------------------------------------------------------//
+
+#define FIELD3D_INSTANTIATION_LOADBLOCK(type)                       \
+  template                                                          \
+  void Reference<type>::loadBlock(int blockIdx);                    \
+  
+FIELD3D_INSTANTIATION_LOADBLOCK(float16_t);
+FIELD3D_INSTANTIATION_LOADBLOCK(float32_t);
+FIELD3D_INSTANTIATION_LOADBLOCK(float64_t);
+FIELD3D_INSTANTIATION_LOADBLOCK(vec16_t);
+FIELD3D_INSTANTIATION_LOADBLOCK(vec32_t);
+FIELD3D_INSTANTIATION_LOADBLOCK(vec64_t);
+
+//----------------------------------------------------------------------------//
+
+#define FIELD3D_INSTANTIATION_OPENFILE(type)                        \
+  template                                                          \
+  void Reference<type>::openFile();                                 \
+  
+FIELD3D_INSTANTIATION_OPENFILE(float16_t);
+FIELD3D_INSTANTIATION_OPENFILE(float32_t);
+FIELD3D_INSTANTIATION_OPENFILE(float64_t);
+FIELD3D_INSTANTIATION_OPENFILE(vec16_t);
+FIELD3D_INSTANTIATION_OPENFILE(vec32_t);
+FIELD3D_INSTANTIATION_OPENFILE(vec64_t);
+
+} // namespace SparseFile
 
 //----------------------------------------------------------------------------//
 
