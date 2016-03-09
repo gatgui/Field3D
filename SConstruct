@@ -1,14 +1,20 @@
 import os
+import sys
 import glob
 import excons
 from excons.tools import hdf5
 from excons.tools import ilmbase
 from excons.tools import boost
 from excons.tools import dl
+from excons.tools import zlib
 
 # FIELD3D_STATIC
 
 defs = []
+libs = []
+
+if sys.platform == "win32":
+   libs.append("Shlwapi")
 
 static = (excons.GetArgument("field3d-static", 0, int) != 0)
 if static:
@@ -33,12 +39,14 @@ targets = [
    {"name": "Field3D",
     "type": "staticlib" if static else "sharedlib",
     "defs": defs,
-    "incdirs": ["export"],
+    "incdirs": ["export", "include"],
     "srcs": glob.glob("src/*.cpp"),
+    "libs": libs,
     "install": {"include/Field3D": headers},
     "custom": [hdf5.Require(hl=False, verbose=verbose),
                ilmbase.Require(ilmthread=False, iexmath=False),
-               boost.Require(libs=["system", "regex", "thread"]),
+               boost.Require(libs=["system", "thread"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dinfo",
     "type": "program",
@@ -49,6 +57,7 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dmakemip",
     "type": "program",
@@ -59,6 +68,7 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex", "thread"]),
+               zlib.Require,
                dl.Require]},
    {"name": "f3dsample",
     "type": "program",
@@ -69,10 +79,15 @@ targets = [
     "custom": [hdf5.Require(hl=False),
                ilmbase.Require(ilmthread=False, iexmath=False),
                boost.Require(libs=["program_options", "system", "regex"]),
+               zlib.Require,
                dl.Require]}
 ]
 
 env = excons.MakeBaseEnv()
+if sys.platform != "win32":
+   env.Append(CPPFLAGS=" -Wno-unused-parameter")
+   if sys.platform == "darwin":
+      env.Append(CPPFLAGS=" -Wno-unused-local-typedef")
 
 excons.DeclareTargets(env, targets)
 

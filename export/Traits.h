@@ -60,6 +60,48 @@ for converting templatization into strings and enums.
 FIELD3D_NAMESPACE_OPEN
 
 //----------------------------------------------------------------------------//
+// Types
+//----------------------------------------------------------------------------//
+
+#if !defined(_MSC_VER)
+using ::uint8_t;
+using ::int8_t;
+using ::uint16_t;
+using ::int16_t;
+using ::uint32_t;
+using ::int32_t;
+using ::uint64_t;
+using ::int64_t;
+#else
+typedef unsigned char           uint8_t;
+typedef signed char             int8_t;
+typedef unsigned short          uint16_t;
+typedef signed short            int16_t;
+typedef unsigned int            uint32_t;
+typedef int                     int32_t;
+typedef unsigned long long      uint64_t;
+typedef long long               int64_t;
+#endif
+
+typedef half                    float16_t;
+typedef float                   float32_t;
+typedef double                  float64_t;
+
+#ifdef FIELD3D_VERSION_NS
+typedef Field3D::V3h            vec16_t;
+typedef Field3D::V3f            vec32_t;
+typedef Field3D::V3d            vec64_t;
+typedef Field3D::V3i            veci32_t;
+typedef Field3D::M44d           mtx64_t;
+#else
+typedef Imath::Vec3<float16_t>  vec16_t;
+typedef Imath::Vec3<float32_t>  vec32_t;
+typedef Imath::Vec3<float64_t>  vec64_t;
+typedef Imath::Vec3<int32_t>    veci32_t;
+typedef Imath::M44d             mtx64_t;
+#endif
+
+//----------------------------------------------------------------------------//
 // Enums
 //----------------------------------------------------------------------------//
 
@@ -76,6 +118,49 @@ enum DataTypeEnum {
 };
 
 //----------------------------------------------------------------------------//
+
+//! Enumerates the various uses for Ogawa-level groups. 
+//! \warning Do not under any circumstances alter the order of these! If you
+//! need to add more types, append them at the end, before F3DNumDataTypes.
+enum OgDataType {
+
+  // Signed and unsigned integers from char to long
+  F3DInt8 = 0,
+  F3DUint8,
+
+  F3DInt16,
+  F3DUint16,
+
+  F3DInt32,
+  F3DUint32,
+
+  F3DInt64,
+  F3DUint64,
+
+  // Floats
+  F3DFloat16,
+  F3DFloat32,
+  F3DFloat64,
+
+  // Vec3
+  F3DVec16,
+  F3DVec32,
+  F3DVec64,
+  F3DVecI32,
+
+  // Matrix
+  F3DMtx64,
+
+  // String
+  F3DString, 
+
+  F3DNumDataTypes, 
+
+  // Invalid type enum
+  F3DInvalidDataType = 127
+};
+
+//----------------------------------------------------------------------------//
 // FieldTraits
 //----------------------------------------------------------------------------//
 
@@ -89,7 +174,88 @@ class FieldTraits
 {
 public:
   //! Dimensions of the given data type. i.e. 3 for V3f, 1 for float
-  static int dataDims();
+  static const int k_dataDims = 3;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<half>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<float>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<double>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<int>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<char>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<unsigned char>
+{
+public:
+  static const int k_dataDims = 1;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<V3h>
+{
+public:
+  static const int k_dataDims = 3;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<V3f>
+{
+public:
+  static const int k_dataDims = 3;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<V3d>
+{
+public:
+  static const int k_dataDims = 3;
+  static int dataDims() { return k_dataDims; }
+};
+
+template <>
+struct FieldTraits<C3f>
+{
+public:
+  static const int k_dataDims = 3;
+  static int dataDims() { return k_dataDims; }
 };
 
 //----------------------------------------------------------------------------//

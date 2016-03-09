@@ -45,7 +45,13 @@
 #include "PatternMatch.h"
 
 // System includes
-#include <boost/regex.hpp>
+#ifdef WIN32
+#include "Shlwapi.h"
+#define FNM_NOMATCH  1
+#define FNM_NOESCAPE 0
+#else
+#include <fnmatch.h>
+#endif
 
 //----------------------------------------------------------------------------//
 
@@ -55,18 +61,15 @@ FIELD3D_NAMESPACE_OPEN
 // Function implementations
 //----------------------------------------------------------------------------//
 
-std::string& globToRegex(std::string &e)
+#ifdef WIN32
+static int 
+fnmatch(const char *pattern, const char *string, int /*flags*/)
 {
-  // escape regex special characters but for '?'' and '*'
-  // leave '[' range ']' in place 
-  // replace '?'' by .
-  // replace '*'' by .*?
-  static const boost::regex re("([?])|([*])|(\\[.-.\\])|([][{}().+|^$])");
-
-  e = boost::regex_replace(e, re, "(?1.)(?2.*?)(?3$3)(?4\\$4)", boost::match_default | boost::format_all);
-
-  return e;
+  return PathMatchSpec(string, pattern) ? 0 : FNM_NOMATCH;
 }
+#endif
+
+//----------------------------------------------------------------------------//
 
 std::vector<std::string> 
 split(const std::string &s)
@@ -131,8 +134,7 @@ match(const std::string &name, const std::string &attribute,
     }
     
     // Match with wildcards
-    boost::regex re(globToRegex(pattern), boost::regex::normal | boost::regex::no_except);
-    if (boost::regex_match(s, re)) {
+    if (fnmatch(pattern.c_str(), s.c_str(), FNM_NOESCAPE) == 0) {
       if (isExclusion) {
         foundExclusion = true;
       } else {
@@ -187,8 +189,7 @@ match(const std::string &attribute, const std::vector<std::string> &patterns,
     } 
     
     // Match with wildcards
-    boost::regex re(globToRegex(pattern), boost::regex::normal | boost::regex::no_except );
-    if (boost::regex_match(attribute, re)) {
+    if (fnmatch(pattern.c_str(), attribute.c_str(), FNM_NOESCAPE) == 0) {
       if (isExclusion) {
         foundExclusion = true;
       } else {

@@ -82,6 +82,18 @@ namespace Msg {
 
 } // namespace Msg
 
+//----------------------------------------------------------------------------//
+// Logging helper functions
+//----------------------------------------------------------------------------//
+
+//! Converts a byte count into a human-readable string
+std::string bytesToString(int64_t bytes);
+
+//----------------------------------------------------------------------------//
+
+//! Returns the current resident memory size
+//! \warning Currently only supported on Linux platform. Returns 0 for others.
+size_t currentRSS();
 
 //----------------------------------------------------------------------------//
 

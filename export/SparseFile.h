@@ -54,10 +54,15 @@
 
 #include "Exception.h"
 #include "Hdf5Util.h"
+#include "OgawaFwd.h"
 #include "SparseDataReader.h"
 #include "Traits.h"
 
 //----------------------------------------------------------------------------//
+
+#define F3D_SHORT_MUTEX_ARRAY 1
+#define F3D_MUTEX_ARRAY_SIZE  1000
+#define F3D_NO_BLOCKS_ARRAY   1
 
 #include "ns.h"
 
@@ -76,6 +81,9 @@ namespace Sparse {
 
 template <typename Data_T>
 class SparseField;
+
+template <typename Data_T>
+class OgSparseDataReader;
 
 //----------------------------------------------------------------------------//
 
@@ -106,13 +114,20 @@ public:
 #else
   typedef Reference*                                Ptr;
 #endif
+
+#if F3D_NO_BLOCKS_ARRAY
+  typedef Sparse::SparseBlock<Data_T>*              BlockPtrs;
+#else
   typedef std::vector<Sparse::SparseBlock<Data_T>*> BlockPtrs;
+#endif
 
   // Public data members -------------------------------------------------------
 
   std::string filename;
   std::string layerPath;
   int valuesPerBlock;
+  int numVoxels;
+  int numBlocks;
   int occupiedBlocks;
  
   //! Index in file for each block
@@ -138,6 +153,10 @@ public:
   //! individually, for guaranteeing thread-safe updates of the ref
   //! counts
   boost::mutex *blockMutex;
+#if F3D_SHORT_MUTEX_ARRAY
+  //! Size of the mutex array. Used as modulus base.
+  int blockMutexSize;
+#endif
 
   // Ctors, dtor ---------------------------------------------------------------
 
@@ -187,6 +206,8 @@ public:
   float averageLoads() const;
   //! Resets counts of total block loads
   void resetCacheStatistics();
+  //! Memory use for the Reference
+  long long int memSize() const;
 
 private:
 
@@ -216,9 +237,20 @@ private:
   //! openFile().
   SparseDataReader<Data_T> *m_reader;
 
+  //! Shared pointer to the ogawa reader. 
+  boost::shared_ptr<OgSparseDataReader<Data_T> > m_ogReaderPtr;
+  //! Pointer to the ogawa reader. NULL at construction time. Created in 
+  //! openFile().
+  OgSparseDataReader<Data_T> *m_ogReader;
+  //! Ogawa archive
+  IArchivePtr m_ogArchive;
+  //! Ogawa archive root
+  OgIGroupPtr m_ogRoot;
+  //! Ogawa layer group
+  OgIGroupPtr m_ogLayerGroup;
+
   //! Mutex to prevent two threads from modifying conflicting data
-  // boost::mutex m_mutex;
-  Mutex m_mutex;
+  mutable Mutex m_mutex;
 
   //! Number of currently active blocks
   size_t m_numActiveBlocks;
@@ -261,6 +293,9 @@ public:
   //! Returns the number of file references of the corresponding collection
   template <class Data_T>
   size_t numRefs() const;
+
+  //! Returns the memory use for the refs
+  long long int memSize() const;
 
 private:
 
@@ -413,6 +448,9 @@ public:
   //! Resets block load
   void resetCacheStatistics();
 
+  //! Returns the number of bytes used by the SparseFileManager itself
+  long long int memSize() const;
+
   //--------------------------------------------------------------------------//
   // Utility functions
 
@@ -504,7 +542,7 @@ private:
 
   //! Mutex to prevent multiple threads from deallocating blocks at
   //! the same time
-  boost::mutex m_mutex;
+  mutable boost::mutex m_mutex;
 
 };
 
@@ -520,8 +558,8 @@ template <class Data_T>
 Reference<Data_T>::Reference(const std::string a_filename, 
                              const std::string a_layerPath)
   : filename(a_filename), layerPath(a_layerPath),
-    valuesPerBlock(-1), occupiedBlocks(-1),
-    blockMutex(NULL), m_fileHandle(-1), m_reader(NULL),
+    valuesPerBlock(-1), numVoxels(-1), numBlocks(-1), occupiedBlocks(-1),
+    blockMutex(NULL), m_fileHandle(-1), m_reader(NULL), m_ogReader(NULL), 
     m_numActiveBlocks(0)
 { 
   /* Empty */ 
@@ -534,8 +572,9 @@ Reference<Data_T>::~Reference()
 {
   closeFile();
 
-  if (m_reader)
+  if (m_reader) {
     delete m_reader;
+  }
 
   if (blockMutex)
     delete [] blockMutex;
@@ -546,6 +585,8 @@ Reference<Data_T>::~Reference()
 template <class Data_T>
 Reference<Data_T>::Reference(const Reference<Data_T> &o)
 {
+  m_ogReaderPtr.reset();
+  m_ogReader = NULL;
   m_reader = NULL;
   blockMutex = NULL;
   *this = o;
@@ -565,6 +606,7 @@ Reference<Data_T>::operator=(const Reference<Data_T> &o)
   filename = o.filename;
   layerPath = o.layerPath;
   valuesPerBlock = o.valuesPerBlock;
+  numVoxels = o.numVoxels;
   occupiedBlocks = o.occupiedBlocks;
   fileBlockIndices = o.fileBlockIndices;
   blockLoaded = o.blockLoaded;
@@ -574,7 +616,17 @@ Reference<Data_T>::operator=(const Reference<Data_T> &o)
   refCounts = o.refCounts;
   if (blockMutex)
     delete[] blockMutex;
+#if F3D_SHORT_MUTEX_ARRAY
+#  if F3D_NO_BLOCKS_ARRAY
+  blockMutexSize = std::min(numBlocks, F3D_MUTEX_ARRAY_SIZE);
+#  else
+  blockMutexSize = std::min(static_cast<int>(blocks.size()), 
+                            F3D_MUTEX_ARRAY_SIZE);
+#  endif
+  blockMutex = new boost::mutex[blockMutexSize];
+#else
   blockMutex = new boost::mutex[blocks.size()];
+#endif
 
 #if 0
   // MW: Should this be copying the file handle? Never seems to happen,
@@ -593,6 +645,9 @@ Reference<Data_T>::operator=(const Reference<Data_T> &o)
   if (m_reader)
     delete m_reader;
   m_reader = NULL;
+
+  m_ogReaderPtr.reset();
+  m_ogReader = NULL;
 
   return *this;
 }
@@ -618,61 +673,34 @@ bool Reference<Data_T>::fileIsOpen()
 //----------------------------------------------------------------------------//
 
 template <class Data_T>
-void Reference<Data_T>::setNumBlocks(int numBlocks)
+void Reference<Data_T>::setNumBlocks(int a_numBlocks)
 {
   boost::mutex::scoped_lock lock(m_mutex);
 
+  // Store number of blocks in member variable
+  numBlocks = a_numBlocks;
+
   fileBlockIndices.resize(numBlocks);
   blockLoaded.resize(numBlocks, 0);
+#if !F3D_NO_BLOCKS_ARRAY
   blocks.resize(numBlocks, 0);
+#endif
   blockUsed.resize(numBlocks, false);
   loadCounts.resize(numBlocks, 0);
   refCounts.resize(numBlocks, 0);
   if (blockMutex)
     delete[] blockMutex;
+#if F3D_SHORT_MUTEX_ARRAY
+#  if F3D_NO_BLOCKS_ARRAY
+  blockMutexSize = std::min(numBlocks, F3D_MUTEX_ARRAY_SIZE);
+#  else
+  blockMutexSize = std::min(blocks.size(), 
+                            static_cast<size_t>(F3D_MUTEX_ARRAY_SIZE));
+#  endif
+  blockMutex = new boost::mutex[blockMutexSize];
+#else
   blockMutex = new boost::mutex[numBlocks];
-}
-
-//----------------------------------------------------------------------------//
-
-template <class Data_T>
-void Reference<Data_T>::openFile()
-{
-  using namespace Exc;
-  using namespace Hdf5Util;
-
-  boost::mutex::scoped_lock lock_A(m_mutex);
-
-  // check that the file wasn't already opened before obtaining the lock
-  if (fileIsOpen()) {
-    return;
-  }
-
-  {
-    // Hold the global lock
-    GlobalLock lock(g_hdf5Mutex);
-    // Open the file
-    m_fileHandle = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-    if (m_fileHandle < 0) {
-      printf("openFile(): No file handle. Dying.\n");
-      throw NoSuchFileException(filename);
-    }
-    // Open the layer group
-    m_layerGroup.open(m_fileHandle, layerPath.c_str());
-    if (m_layerGroup.id() < 0) {
-      Msg::print(Msg::SevWarning, "In SparseFile::Reference::openFile: "
-                 "Couldn't find layer group " + layerPath + 
-                 " in .f3d file ");
-      throw FileIntegrityException(filename);
-    }
-  }
-
-  // Re-allocate reader
-  if (m_reader) {
-    delete m_reader;
-  }
-  m_reader = new SparseDataReader<Data_T>(m_layerGroup.id(), valuesPerBlock, 
-                                          occupiedBlocks);
+#endif
 }
 
 //----------------------------------------------------------------------------//
@@ -690,29 +718,14 @@ void Reference<Data_T>::closeFile()
 //----------------------------------------------------------------------------//
 
 template <class Data_T>
-void Reference<Data_T>::loadBlock(int blockIdx)
-{
-  boost::mutex::scoped_lock lock(m_mutex);
-
-  // Allocate the block  
-  blocks[blockIdx]->resize(valuesPerBlock);
-  assert(blocks[blockIdx]->data != NULL);
-  // Read the data
-  assert(m_reader);
-  m_reader->readBlock(fileBlockIndices[blockIdx], *blocks[blockIdx]->data);
-  // Mark block as loaded
-  blockLoaded[blockIdx] = 1;
-  // Track count
-  m_numActiveBlocks++;
-}
-
-//----------------------------------------------------------------------------//
-
-template <class Data_T>
 void Reference<Data_T>::unloadBlock(int blockIdx)
 {
   // Deallocate the block
+#if F3D_NO_BLOCKS_ARRAY
+  blocks[blockIdx].clear();
+#else
   blocks[blockIdx]->clear();
+#endif
   // Mark block as unloaded
   blockLoaded[blockIdx] = 0;
   // Track count
@@ -730,7 +743,11 @@ void Reference<Data_T>::unloadBlock(int blockIdx)
 template <class Data_T>
 void Reference<Data_T>::incBlockRef(int blockIdx)
 {
+#if F3D_SHORT_MUTEX_ARRAY
+  boost::mutex::scoped_lock lock(blockMutex[blockIdx % blockMutexSize]);
+#else
   boost::mutex::scoped_lock lock(blockMutex[blockIdx]);
+#endif
   ++refCounts[blockIdx];
 }
 
@@ -739,7 +756,11 @@ void Reference<Data_T>::incBlockRef(int blockIdx)
 template <class Data_T>
 void Reference<Data_T>::decBlockRef(int blockIdx)
 {
+#if F3D_SHORT_MUTEX_ARRAY
+  boost::mutex::scoped_lock lock(blockMutex[blockIdx % blockMutexSize]);
+#else
   boost::mutex::scoped_lock lock(blockMutex[blockIdx]);
+#endif
   --refCounts[blockIdx];
 }
 
@@ -748,7 +769,7 @@ void Reference<Data_T>::decBlockRef(int blockIdx)
 template <class Data_T>
 int Reference<Data_T>::blockSize(int /* blockIdx */) const
 {
-  return valuesPerBlock * sizeof(Data_T);
+  return numVoxels * sizeof(Data_T);
 }
 
 //----------------------------------------------------------------------------//
@@ -772,12 +793,12 @@ int Reference<Data_T>::numLoadedBlocks() const
 {
   std::vector<int>::const_iterator i = blockLoaded.begin();
   std::vector<int>::const_iterator end = blockLoaded.end();
-  int numBlocks = 0;
+  int numBlockCounter = 0;
   for (; i != end; ++i)
     if (*i)
-      numBlocks++;
+      numBlockCounter++;
 
-  return numBlocks;
+  return numBlockCounter;
 }
 
 //----------------------------------------------------------------------------//
@@ -788,21 +809,21 @@ int Reference<Data_T>::totalLoadedBlocks() const
   std::vector<int>::const_iterator i = loadCounts.begin();
   std::vector<int>::const_iterator li = blockLoaded.begin();
   std::vector<int>::const_iterator end = loadCounts.end();
-  int numBlocks = 0;
+  int numBlockCounter = 0;
 
   if (blockLoaded.size() == 0) {
     for (; i != end; ++i)
       if (*i)
-        numBlocks++;
+        numBlockCounter++;
   } else {
     assert(loadCounts.size() == blockLoaded.size());
 
     for (; i != end; ++i, ++li)
       if (*i || *li)
-        numBlocks++;
+        numBlockCounter++;
   }
   
-  return numBlocks;
+  return numBlockCounter;
 }
 
 //----------------------------------------------------------------------------//
@@ -812,15 +833,15 @@ float Reference<Data_T>::averageLoads() const
 {
   std::vector<int>::const_iterator i = loadCounts.begin();
   std::vector<int>::const_iterator end = loadCounts.end();
-  int numLoads = 0, numBlocks = 0;
+  int numLoads = 0, numBlockCounter = 0;
   for (; i != end; ++i) {
     if (*i) {
       numLoads += *i;
-      numBlocks++;
+      numBlockCounter++;
     }
   }
 
-  return (float)numLoads / std::max(1, numBlocks);
+  return (float)numLoads / std::max(1, numBlockCounter);
 }
 
 //----------------------------------------------------------------------------//
@@ -832,6 +853,31 @@ void Reference<Data_T>::resetCacheStatistics()
   std::vector<int>::iterator lend = loadCounts.end();
   for (; li != lend; ++li)
     *li = 0;
+}
+
+//----------------------------------------------------------------------------//
+
+template <class Data_T>
+long long int
+Reference<Data_T>::memSize() const
+{
+  boost::mutex::scoped_lock lock(m_mutex);
+
+  return sizeof(*this) + 
+    fileBlockIndices.capacity() * sizeof(int) + 
+    blockLoaded.capacity() * sizeof(int) + 
+#if !F3D_NO_BLOCKS_ARRAY
+    blocks.capacity() * sizeof(Sparse::SparseBlock<Data_T>*) + 
+#endif
+    blockUsed.capacity() * sizeof(bool) + 
+    loadCounts.capacity() * sizeof(int) + 
+    refCounts.capacity() * sizeof(int) + 
+#if F3D_SHORT_MUTEX_ARRAY
+    blockMutexSize * sizeof(boost::mutex) + 
+#else
+    numBlocks * sizeof(boost::mutex) + 
+#endif
+    sizeof(SparseDataReader<Data_T>);
 }
 
 //----------------------------------------------------------------------------//
@@ -1081,7 +1127,7 @@ inline size_t FileReferences::numRefs<V3d>() const
 #if 0
 
 template <class Data_T>
-Reference<Data_T>& FileReferences::ref(size_t idx)
+Reference<Data_T>& FileReferences::ref(size_t)
 {
   assert(false && "Do not use memory limiting on sparse fields that aren't "
          "simple scalars or vectors!");
@@ -1095,7 +1141,7 @@ Reference<Data_T>& FileReferences::ref(size_t idx)
 //----------------------------------------------------------------------------//
 
 template <class Data_T>
-size_t FileReferences::append(const Reference<Data_T>& ref)
+size_t FileReferences::append(const Reference<Data_T>&)
 {
   assert(false && "Do not use memory limiting on sparse fields that aren't "
          "simple scalars or vectors!");
@@ -1179,9 +1225,13 @@ SparseFileManager::removeFieldFromCache(int refIdx)
   m_memUse -= bytesFreed;
 
   std::vector<int>().swap(reference->fileBlockIndices);
+#if F3D_NO_BLOCKS_ARRAY
+  reference->fileBlockIndices.resize(reference->numBlocks, -1);
+#else
   reference->fileBlockIndices.resize(reference->blocks.size(), -1);
   typedef typename SparseFile::Reference<Data_T>::BlockPtrs BlockPtrs;
   BlockPtrs().swap(reference->blocks);
+#endif
   std::vector<int>().swap(reference->blockLoaded);
   std::vector<bool>().swap(reference->blockUsed);
   std::vector<int>().swap(reference->loadCounts);
@@ -1221,7 +1271,12 @@ SparseFileManager::activateBlock(int fileId, int blockIdx)
       }
 
       boost::mutex::scoped_lock lock_A(m_mutex);
+#if F3D_SHORT_MUTEX_ARRAY
+      boost::mutex::scoped_lock 
+        lock_B(reference->blockMutex[blockIdx % reference->blockMutexSize]);
+#else
       boost::mutex::scoped_lock lock_B(reference->blockMutex[blockIdx]);
+#endif
       // check to see if it was loaded between when the function
       // started and we got the lock on the block
       if (!reference->blockLoaded[blockIdx]) {

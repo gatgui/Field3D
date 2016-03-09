@@ -280,6 +280,8 @@ protected:
   void updateMapping(FieldRes::Ptr field);
   //! Updates the dependent data members based on m_field
   void updateAuxMembers() const;
+  //! Updates the name, attribute and metadata for a given level
+  void syncLevelInfo(const size_t level) const;
   //! Loads the given level from disk
   void loadLevelFromDisk(size_t level) const;
   //! Sanity checks to ensure that the provided Fields are a MIP representation
@@ -295,7 +297,11 @@ protected:
 template <typename Data_T>
 class MIPSparseField : public MIPField<SparseField<Data_T> >
 {
-  
+public:
+    virtual FieldBase::Ptr clone() const
+  { 
+    return FieldBase::Ptr(new MIPSparseField(*this));
+  }
 };
 
 //----------------------------------------------------------------------------//
@@ -303,7 +309,11 @@ class MIPSparseField : public MIPField<SparseField<Data_T> >
 template <typename Data_T>
 class MIPDenseField : public MIPField<DenseField<Data_T> >
 {
-  
+  public:
+    virtual FieldBase::Ptr clone() const
+  { 
+    return FieldBase::Ptr(new MIPDenseField(*this));
+  }
 };
 
 //----------------------------------------------------------------------------//
@@ -475,6 +485,7 @@ MIPField<Field_T>::rawMipLevel(size_t level) const
   if (!m_rawFields[level]) {
     loadLevelFromDisk(level);
   } 
+  // Return 
   return m_rawFields[level];
 }
 
@@ -489,6 +500,7 @@ MIPField<Field_T>::concreteMipLevel(size_t level) const
   if (!m_rawFields[level]) {
     loadLevelFromDisk(level);
   } 
+  // Return 
   return m_fields[level];
 }
 
@@ -535,6 +547,11 @@ long long int MIPField<Field_T>::memSize() const
 template <class Field_T>
 void MIPField<Field_T>::mappingChanged() 
 { 
+  // Update MIP offset
+  const V3i offset = 
+    base::metadata().vecIntMetadata(detail::k_mipOffsetStr, V3i(0));
+  base::setMIPOffset(offset);
+
   V3i baseRes = base::dataWindow().size() + V3i(1);
   if (m_fields[0]) {
     m_fields[0]->setMapping(base::mapping());
@@ -542,7 +559,7 @@ void MIPField<Field_T>::mappingChanged()
   for (size_t i = 1; i < m_fields.size(); i++) {
     if (m_fields[i]) {
       FieldMapping::Ptr mapping = 
-        detail::adjustedMIPFieldMapping(base::mapping(), baseRes, 
+        detail::adjustedMIPFieldMapping(this, baseRes,
                                         m_fields[i]->extents(), i);
       m_fields[i]->setMapping(mapping);
     }
@@ -582,7 +599,19 @@ template <typename Field_T>
 void MIPField<Field_T>::getVsMIPCoord(const V3f &vsP, const size_t level, 
                                       V3f &outVsP) const
 {
-  outVsP = vsP * m_relativeResolution[level];
+  const V3i &mipOff = base::mipOffset();
+
+  // Compute offset of current level 
+  const V3i offset((mipOff.x >> level) << level, 
+                   (mipOff.y >> level) << level, 
+                   (mipOff.z >> level) << level);
+
+  // Difference between current offset and base offset is num voxels
+  // to offset current level by 
+  const V3f diff = offset - mipOff;
+
+  // Incorporate shift due to mip offset
+  outVsP = (vsP - diff) * pow(2.0, -static_cast<float>(level));
 }
 
 //----------------------------------------------------------------------------//
@@ -596,6 +625,7 @@ MIPField<Field_T>::mipLevel(const size_t level) const
   if (!m_rawFields[level]) {
     loadLevelFromDisk(level);
   } 
+  // Return 
   return m_fields[level];
 }
 
@@ -628,6 +658,20 @@ void MIPField<Field_T>::updateAuxMembers() const
 //----------------------------------------------------------------------------//
 
 template <class Field_T>
+void MIPField<Field_T>::syncLevelInfo(const size_t level) const
+{
+  // At this point, m_fields[level] is guaranteed in memory
+  
+  // First sync name, attribute
+  m_fields[level]->name      = base::name;
+  m_fields[level]->attribute = base::attribute;
+  // Copy metadata
+  m_fields[level]->copyMetadata(*this);
+}
+
+//----------------------------------------------------------------------------//
+
+template <class Field_T>
 void MIPField<Field_T>::updateMapping(FieldRes::Ptr field)
 {
   base::m_extents = field->extents();
@@ -646,14 +690,21 @@ void MIPField<Field_T>::loadLevelFromDisk(size_t level) const
     if (!m_rawFields[level]) {
       // Execute the lazy load action
       m_fields[level] = m_loadActions[level]->load();
+      // Check that field was loaded
+      if (!m_fields[level]) {
+        throw Exc::MIPFieldException("Couldn't load MIP level: " + 
+                                     boost::lexical_cast<std::string>(level));
+      }
       // Remove lazy load action
       m_loadActions[level].reset();
       // Update aux data
       updateAuxMembers();
+      // Ensure metadata is up to date
+      syncLevelInfo(level);
       // Update the mapping of the loaded field
       V3i baseRes = base::dataWindow().size() + V3i(1);
       FieldMapping::Ptr mapping = 
-        detail::adjustedMIPFieldMapping(base::mapping(), baseRes, 
+        detail::adjustedMIPFieldMapping(this, baseRes, 
                                         m_fields[level]->extents(), level);
       m_fields[level]->setMapping(mapping);
     }
@@ -688,18 +739,18 @@ MIPField<Field_T>::sanityChecks(const T &fields)
     if (size.x > prevSize.x || 
         size.y > prevSize.y ||
         size.z > prevSize.z) {
-      throw MIPFieldException("Field " + 
-                                   lexical_cast<string>(i) + 
-                                   " had greater resolution than previous"
-                                   " level");
+      throw MIPFieldException("Field " + lexical_cast<string>(i) + 
+                              " had greater resolution than previous"
+                              " level");
     }
     if (size.x >= prevSize.x &&
         size.y >= prevSize.y &&
         size.z >= prevSize.z) {
-      throw MIPFieldException("Field " + 
-                                   lexical_cast<string>(i) + 
-                                   " did not decrease in resolution from "
-                                   " previous level");
+      throw MIPFieldException("Field " + lexical_cast<string>(i) + 
+                              " did not decrease in resolution from "
+                              " previous level: " + 
+                              lexical_cast<string>(size) + " > " + 
+                              lexical_cast<string>(prevSize));
     }
     prevSize = size;
   }

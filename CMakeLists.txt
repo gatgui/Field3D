@@ -51,6 +51,9 @@ ENDIF ()
 
 FIND_PACKAGE (ILMBase)
 
+# Allow the developer to select if Dynamic or Static libraries are built
+OPTION (BUILD_SHARED_LIBS "Build Shared Libraries" ON)
+
 OPTION (INSTALL_DOCS "Automatically install documentation." ON)
 
 # Duplicate the export directory to Field3D
@@ -74,30 +77,57 @@ IF ( CMAKE_HOST_UNIX )
   ADD_DEFINITIONS ( -fPIC -DREQUIRE_IOSTREAM -Wno-invalid-offsetof )
 ENDIF ( )
 IF ( CMAKE_HOST_WIN32 )
-  ADD_DEFINITIONS ( 
-    -DOPENEXR_DLL 
-    -D_HDF5USEDLL_ 
-    -DHDF5CPP_USEDLL 
+  ADD_DEFINITIONS (
     -D_HAS_ITERATOR_DEBUGGING=0 
     -D_CRT_SECURE_NO_WARNINGS=1
     )
 ENDIF ( )
 
-ADD_LIBRARY ( Field3D SHARED
+SET ( LIB_TYPE SHARED )
+IF ( NOT BUILD_SHARED_LIBS )
+  IF ( CMAKE_HOST_WIN32 )
+  # User wants to build static libraries, so change the LIB_TYPE variable to CMake keyword 'STATIC'
+    SET ( LIB_TYPE STATIC )
+    ADD_DEFINITIONS( -DFIELD3D_STATIC )
+  ENDIF()
+ELSE ()
+  IF ( CMAKE_HOST_WIN32 )
+    ADD_DEFINITIONS (
+        -DOPENEXR_DLL
+        -D_HDF5USEDLL_
+        -DHDF5CPP_USEDLL
+        )
+  ENDIF()
+ENDIF ( NOT BUILD_SHARED_LIBS )
+
+ADD_LIBRARY ( Field3D ${LIB_TYPE}
   src/ClassFactory.cpp
   src/DenseFieldIO.cpp
   src/Field3DFile.cpp
+  src/Field3DFileHDF5.cpp
+  src/FieldCache.cpp
   src/Field.cpp
   src/FieldInterp.cpp
   src/FieldMapping.cpp
   src/FieldMappingIO.cpp
+  src/FieldMetadata.cpp
   src/FileSequence.cpp
   src/Hdf5Util.cpp
+  src/IArchive.cpp
+  src/IData.cpp
+  src/IGroup.cpp
   src/InitIO.cpp
+  src/IStreams.cpp
   src/Log.cpp
   src/MACFieldIO.cpp
   src/MIPFieldIO.cpp
   src/MIPUtil.cpp
+  src/OArchive.cpp
+  src/OData.cpp
+  src/OgIGroup.cpp
+  src/OGroup.cpp
+  src/OgUtil.cpp
+  src/OStream.cpp
   src/PatternMatch.cpp
   src/PluginLoader.cpp
   src/ProceduralField.cpp
@@ -129,7 +159,7 @@ IF ( CMAKE_HOST_WIN32 )
       optimized ${lib}
       debug ${lib}_d )
   ENDFOREACH()
-  SET ( Field3D_DSO_Libraries ${Field3D_Libraries_Shared} )
+  SET ( Field3D_DSO_Libraries ${Field3D_Libraries_Shared} Shlwapi.lib)
   SET ( Field3D_BIN_Libraries Field3D ${Boost_LIBRARIES} )
 ENDIF ()
 
@@ -153,7 +183,11 @@ SET_TARGET_PROPERTIES ( Field3D PROPERTIES SOVERSION ${FIELD3D_SOVERSION})
 
 IF ( CMAKE_HOST_WIN32 )
   SET_TARGET_PROPERTIES( Field3D PROPERTIES ENABLE_EXPORTS ON )
-  SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_DEFINITIONS FIELD3D_EXPORT )
+  IF ( BUILD_SHARED_LIBS )
+    SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_DEFINITIONS FIELD3D_EXPORT )
+  ELSE ()
+    SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_DEFINITIONS FIELD3D_STATIC )
+  ENDIF()
   SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_FLAGS -EHsc )
   SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_FLAGS -MD )
   SET_TARGET_PROPERTIES( Field3D PROPERTIES COMPILE_FLAGS -wd4251 )

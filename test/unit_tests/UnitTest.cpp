@@ -40,7 +40,7 @@
 
 #include <boost/test/included/unit_test.hpp>
 
-#include <boost/timer.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/thread/thread.hpp>
 #include <boost/thread/mutex.hpp>
 
@@ -71,6 +71,7 @@ using namespace Field3D::Hdf5Util;
 //----------------------------------------------------------------------------//
 
 namespace {
+  using namespace boost::posix_time;
   template <typename T>
   struct Add
   {
@@ -94,16 +95,35 @@ namespace {
       current += static_cast<T>(1.0);
     }
   };
-  class ScopedPrintTimer
+  struct Timer
+  {
+    Timer()
+      : m_startTime(microsec_clock::local_time())
+    { }
+    size_t ms()
+    { 
+      return size_t((microsec_clock::local_time() - 
+                     m_startTime).total_milliseconds()); 
+    }
+    size_t us()
+    { 
+      return size_t((microsec_clock::local_time() - 
+                     m_startTime).total_microseconds()); 
+    }
+  private:
+    ptime m_startTime;
+  };  class ScopedPrintTimer
   {
   public:
-    boost::timer timer;
+    Timer timer;
     ScopedPrintTimer(int numThreads=1)
       : m_numThreads(numThreads)
       {}
     ~ScopedPrintTimer()
     {
-      Msg::print("  Time elapsed: " + lexical_cast<string>(timer.elapsed()/float(m_numThreads)));
+      Msg::print("  Time elapsed: " + 
+                 lexical_cast<string>(0.001 * timer.ms() / 
+                                      float(m_numThreads)));
     }
     int m_numThreads;
   };
@@ -959,7 +979,7 @@ void testFastCubicInterp()
 
 //----------------------------------------------------------------------------//
 
-template <template <typename T> class Field_T, class Data_T>
+template <template <typename T> class Field_T, class Data_T, bool DoOgawa_T>
 void testField3DFile()
 {
   typedef FIELD3D_VEC3_T<Data_T> Vec3_T;
@@ -967,7 +987,15 @@ void testField3DFile()
   typedef Field_T<Vec3_T> VField;
 
   Msg::print("Field3DFile tests for type " + 
-             string(SField::staticClassType()));
+             string(SField::staticClassType()) + 
+             (DoOgawa_T ? " ogawa" : " hdf5"));
+
+  if (DoOgawa_T) {
+    Field3DOutputFile::useOgawa(true);
+    Field3D::setNumIOThreads(8);
+  } else {
+    Field3DOutputFile::useOgawa(false);
+  }
 
   string currentTest;
 
@@ -987,8 +1015,13 @@ void testField3DFile()
 
   {
     Msg::print(currentTest);
-    ScopedPrintTimer t;
-    string filename(getTempFile("test_" + string(SField::staticClassType()) + ".f3d"));
+    string basename = "test_" + string(SField::staticClassType());
+    if (DoOgawa_T) {
+      basename += "ogawa";
+    } else {
+      basename += "hdf5";
+    }
+    string filename(getTempFile(basename + ".f3d"));
     Box3i extents(V3i(0), V3i(160));
     Box3i dataWindow(V3i(20, 10, 0), V3i(100, 100, 100));
 
@@ -1008,13 +1041,20 @@ void testField3DFile()
     mm->setLocalToWorld(mtx);
     sField->setMapping(mm);
     sField->clear(1.2);
+    sField->metadata().setFloatMetadata("testfloat", 1.0f);
+    sField->metadata().setIntMetadata("testint", 2);
+    sField->metadata().setStrMetadata("teststring", "3!");
 
     // Create the vector field
     typename VField::Ptr vField(new VField);
     vField->setSize(extents, dataWindow);
     MatrixFieldMapping::Ptr mapping(new MatrixFieldMapping);
+    mapping->setLocalToWorld(mtx);
     vField->setMapping(mapping);
     vField->clear(Vec3_T(0.5));
+    vField->metadata().setFloatMetadata("testfloat", 1.0f);
+    vField->metadata().setIntMetadata("testint", 2);
+    vField->metadata().setStrMetadata("teststring", "3!");
 
     // Fill scalar fields with all data 
     std::for_each(sField->begin(), sField->end(), WriteSequence<Data_T>());
@@ -1024,21 +1064,25 @@ void testField3DFile()
     Box3i toFill(dataWindow);
     toFill.min = V3i(30, 30, 30);
     toFill.max = V3i(49, 49, 40);
-    std::for_each(vField->begin(toFill), vField->end(toFill), 
+    std::for_each(vField->begin(), vField->end(), 
                   WriteSequence<Vec3_T>());
 
     // Create the output file
-    Field3DOutputFile out;
+    Field3DOutputFile out, outS, outV;
     bool createSuccess = out.create(filename);
+    outS.create(filename + ".s");
+    outV.create(filename + ".v");
     BOOST_CHECK_EQUAL(createSuccess, true);
 
     // Write two layers
     bool writeSuccess;
     writeSuccess = out.writeScalarLayer<Data_T>(field1Name, densityName, 
                                                 sField);
+    outS.writeScalarLayer<Data_T>(field1Name, densityName, sField);
     BOOST_CHECK_EQUAL(writeSuccess, true);
     writeSuccess = out.writeVectorLayer<Data_T>(field2Name, velName, 
                                                 vField);
+    outV.writeVectorLayer<Data_T>(field2Name, velName, vField);
     BOOST_CHECK_EQUAL(writeSuccess, true);
 
     /// write out global metadata
@@ -1063,20 +1107,20 @@ void testField3DFile()
     iFile.open(filename);
 
     // check the global meta data are correct
-    V3f inMetaVecFloat = iFile.metadata().vecFloatMetadata(
-      "testGlobalMetadataVecFloat", V3f(9.0));
+    V3f inMetaVecFloat = 
+      iFile.metadata().vecFloatMetadata("testGlobalMetadataVecFloat", V3f(9.0));
     BOOST_CHECK_EQUAL(metaVecFloat,inMetaVecFloat);
-    float inMetaFloat = iFile.metadata().floatMetadata(
-      "testGlobalMetadataFloat", 9.0f);
+    float inMetaFloat = 
+      iFile.metadata().floatMetadata("testGlobalMetadataFloat", 9.0f);
     BOOST_CHECK_EQUAL(metaFloat,inMetaFloat);
-    V3i inMetaVecInt = iFile.metadata().vecIntMetadata(
-      "testGlobalMetadataVecInt", V3i(9));
+    V3i inMetaVecInt = 
+      iFile.metadata().vecIntMetadata("testGlobalMetadataVecInt", V3i(9));
     BOOST_CHECK_EQUAL(metaVecInt,inMetaVecInt);
-    int inMetaInt = iFile.metadata().intMetadata(
-      "testGlobalMetadataInt", 9); 
+    int inMetaInt = 
+      iFile.metadata().intMetadata("testGlobalMetadataInt", 9); 
     BOOST_CHECK_EQUAL(metaInt,inMetaInt);
-    string inMetaStr = iFile.metadata().strMetadata(
-      "testGlobalMetadataStr", "Hello");
+    string inMetaStr = 
+      iFile.metadata().strMetadata("testGlobalMetadataStr", "Hello");
     BOOST_CHECK_EQUAL(metaStr,inMetaStr);
 
 
@@ -1141,12 +1185,37 @@ void testField3DFile()
       ScopedPrintTimer t;
       BOOST_CHECK_EQUAL(isIdentical<Data_T>(s1, s2), true);
     }
-    
+
+#if 0
+    Box3i dw = v1->dataWindow();
+    Field<Vec3_T> *p1 = v1.get(), *p2 = v2.get();
+    for (int k = dw.min.z; k <= dw.max.z; ++k) {
+      for (int j = dw.min.y; j <= dw.max.y; ++j) {
+        for (int i = dw.min.x; i <= dw.max.x; ++i) {
+          if (p1->value(i, j, k) != p2->value(i, j, k)) {
+            cout << "Mismatch voxel: " << V3i(i, j, k) << endl;
+          }
+        }
+      }
+    }
+#endif
+
     // Check vector layer data
     {
       Msg::print("Verifying vector data is identical");
       ScopedPrintTimer t;
       BOOST_CHECK_EQUAL(isIdentical<Vec3_T>(v1, v2), true);
+    }
+
+    // Check scalar metadata
+    {
+      Msg::print("Verifying scalar field's metadata is identical");
+      const float fMeta  = s2->metadata().floatMetadata("testfloat", 0.0f);
+      const int iMeta    = s2->metadata().intMetadata("testint", 0);
+      const string sMeta = s2->metadata().strMetadata("teststring", "");
+      BOOST_CHECK_EQUAL(fMeta, 1.0f);
+      BOOST_CHECK_EQUAL(iMeta, 2);
+      BOOST_CHECK_EQUAL(sMeta, "3!");
     }
  
   }
@@ -1345,6 +1414,8 @@ void testReadAsDifferentType()
 
   out.close();
 
+#if 0
+
   // Read it back out as the templated type
 
   Field3DInputFile in;
@@ -1368,6 +1439,8 @@ void testReadAsDifferentType()
   // Mess with the data, and make sure it fails this time
   mf1[0]->lvalue(30, 30, 60) = 9.9;
   BOOST_CHECK_EQUAL(isIdentical<Data_T>(mf1[0], sparse), false);
+
+#endif
 
 }
 
@@ -1457,7 +1530,14 @@ void testBasicFileOpen()
   Msg::print("Testing basic Field3DFile open/close");
   {
     Field3DInputFile in;
-    in.open(getTempFile("test_DenseField.float.f3d"));
+    BOOST_CHECK_EQUAL(in.open(getTempFile("test_DenseField_float_hdf5.f3d")), 
+                      true);
+    in.close();
+  }
+  {
+    Field3DInputFile in;
+    BOOST_CHECK_EQUAL(in.open(getTempFile("test_DenseField_float_ogawa.f3d")), 
+                      true);
     in.close();
   }
 }
@@ -1772,6 +1852,15 @@ void testEmptyMACFieldToDisk()
   writeSuccess = out.writeVectorLayer<Float_T>(field1Name, velocityName, msf);
   BOOST_CHECK_EQUAL(writeSuccess, true);
   out.close(); 
+
+  // Read the file back in
+  Field3DInputFile in;
+  BOOST_CHECK_EQUAL(in.open(filename), true);
+  typename Field<FIELD3D_VEC3_T<Float_T> >::Vec fields = 
+    in.readVectorLayers<Float_T>();
+  BOOST_CHECK_EQUAL(fields.size(), 1);
+  BOOST_CHECK_EQUAL(fields[0] != NULL, true);
+  BOOST_CHECK_EQUAL(field_dynamic_cast<MACField_T>(fields[0]) != NULL, true);
 }
 
 //----------------------------------------------------------------------------//
@@ -2320,13 +2409,23 @@ void testThreadField()
 
 template <template <typename T> class MIP_T, 
           template <typename T> class Field_T, 
-          class Data_T>
+          class Data_T,
+          bool DoOgawa_T>
 void testMIPField()
 {
   typedef MIP_T<Data_T> FieldType;
 
   string TName(DataTypeTraits<Data_T>::name());
-  Msg::print(string("Testing ") + MIP_T<Data_T>::staticClassType());
+  Msg::print(string("Testing ") + 
+             MIP_T<Data_T>::staticClassType()+ 
+             (DoOgawa_T ? " ogawa" : " hdf5"));
+
+  if (DoOgawa_T) {
+    Field3DOutputFile::useOgawa(true);
+    Field3D::setNumIOThreads(8);
+  } else {
+    Field3DOutputFile::useOgawa(false);
+  }
 
   typename Field_T<Data_T>::Ptr level0(new Field_T<Data_T>);
   typename Field_T<Data_T>::Ptr level1(new Field_T<Data_T>);
@@ -2350,18 +2449,27 @@ void testMIPField()
   mipField->name = "mip";
   mipField->attribute = "density";
   
+  string basename = "test_" + string(MIP_T<Data_T>::staticClassType());
+  if (DoOgawa_T) {
+    basename += "ogawa";
+  } else {
+    basename += "hdf5";
+  }
+  string filename(getTempFile(basename + ".f3d"));
+    
   Field3DOutputFile out;
-  string filename(getTempFile(string(MIP_T<Data_T>::staticClassType()) + ".f3d")); 
-
   out.create(filename);
   out.writeScalarLayer<float>(mipField);
+  out.close();
 
   Field3DInputFile in;
   in.open(filename);
+
   typename Field<Data_T>::Vec fields = in.readScalarLayers<Data_T>();
+  BOOST_CHECK_EQUAL(fields.size(), 1);
+
   mipField = field_dynamic_cast<MIP_T<Data_T> >(fields[0]);
 
-  BOOST_CHECK_EQUAL(fields.size(), 1);
   BOOST_CHECK_EQUAL(mipField != NULL, true);
   BOOST_CHECK_EQUAL(mipField->numLevels(), 3);
   bool matchLevel0 = isIdentical<Data_T>(mipField->mipLevel(0), level0);
@@ -2490,7 +2598,7 @@ void testMIPMake()
 #define DO_BASIC_TESTS         1
 #define DO_INTERP_TESTS        1
 #define DO_CUBIC_INTERP_TESTS  1
-#define DO_BASIC_FILE_TESTS    1 
+#define DO_BASIC_FILE_TESTS    1
 #define DO_ADVANCED_FILE_TESTS 1
 #define DO_SPARSE_BLOCK_TESTS  1
 #define DO_MAC_TESTS           1
@@ -2572,12 +2680,18 @@ init_unit_test_suite(int argc, char* argv[])
 
 #if DO_BASIC_FILE_TESTS
 
-  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, half>)));
-  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, half>)));
-  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, float>)));
-  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, float>)));
-  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, double>)));
-  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, double>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, half, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, half, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, float, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, float, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, double, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, double, true>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, half, false>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, half, false>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, float, false>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, float, false>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<DenseField, double, false>)));
+  test->add(BOOST_TEST_CASE((&testField3DFile<SparseField, double, false>)));
   test->add(BOOST_TEST_CASE(&testUnnamedFieldError));
   test->add(BOOST_TEST_CASE(&testBasicFileOpen));
 
@@ -2636,9 +2750,11 @@ init_unit_test_suite(int argc, char* argv[])
 #endif 
 
 #if DO_MIP_TESTS
-  test->add(BOOST_TEST_CASE((&testMIPField<MIPDenseField, DenseField, float>)));
+  test->add(BOOST_TEST_CASE((&testMIPField<MIPDenseField, DenseField, float, true>)));
+  test->add(BOOST_TEST_CASE((&testMIPField<MIPDenseField, DenseField, float, false>)));
   test->add(BOOST_TEST_CASE((&testMIPFieldColor<MIPDenseField, DenseField, V3f>)));
-  test->add(BOOST_TEST_CASE((&testMIPField<MIPSparseField, SparseField, float>)));
+  test->add(BOOST_TEST_CASE((&testMIPField<MIPSparseField, SparseField, float, true>)));
+  test->add(BOOST_TEST_CASE((&testMIPField<MIPSparseField, SparseField, float, false>)));
   test->add(BOOST_TEST_CASE((&testMIPFieldColor<MIPSparseField, SparseField, V3f>)));
   test->add(BOOST_TEST_CASE((&testMIPMake<DenseField, float>)));
   test->add(BOOST_TEST_CASE((&testMIPMake<SparseField, float>)));
