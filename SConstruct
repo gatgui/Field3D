@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import excons
 from excons.tools import hdf5
@@ -9,6 +10,10 @@ from excons.tools import dl
 # FIELD3D_STATIC
 
 defs = []
+libs = []
+
+if sys.platform == "win32":
+   libs.append("Shlwapi")
 
 static = (excons.GetArgument("field3d-static", 0, int) != 0)
 if static:
@@ -35,10 +40,11 @@ targets = [
     "defs": defs,
     "incdirs": ["export"],
     "srcs": glob.glob("src/*.cpp"),
+    "libs": libs,
     "install": {"include/Field3D": headers},
     "custom": [hdf5.Require(hl=False, verbose=verbose),
                ilmbase.Require(ilmthread=False, iexmath=False),
-               boost.Require(libs=["system", "regex", "thread"]),
+               boost.Require(libs=["system", "thread"]),
                dl.Require]},
    {"name": "f3dinfo",
     "type": "program",
@@ -73,6 +79,10 @@ targets = [
 ]
 
 env = excons.MakeBaseEnv()
+if sys.platform != "win32":
+   env.Append(CPPFLAGS=" -Wno-unused-parameter")
+   if sys.platform == "darwin":
+      env.Append(CPPFLAGS=" -Wno-unused-local-typedef")
 
 excons.DeclareTargets(env, targets)
 
