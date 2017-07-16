@@ -48,10 +48,12 @@
 
 #include <vector>
 
+#include <boost/interprocess/sync/lock_options.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/lexical_cast.hpp>
 
 #include "Field.h"
+#include "StochasticInterp.h"
 #include "SparseFile.h"
 
 #define BLOCK_ORDER 4 // 2^BLOCK_ORDER is the block size along each axis
@@ -109,33 +111,15 @@ public:
 
   // Main methods --------------------------------------------------------------
 
-  value_type sample(const SparseField<Data_T> &field, const V3d &vsP) const
+  value_type sample(const SparseField<Data_T> &field, const V3d &vsP,
+                    const float time = 0.0f) const
   {
-    // Pixel centers are at .5 coordinates
-    // NOTE: Don't use contToDisc for this, we're looking for sample
-    // point locations, not coordinate shifts.
-    FIELD3D_VEC3_T<double> p(vsP - FIELD3D_VEC3_T<double>(0.5));
+    // Voxel coords
+    V3i c1, c2;
+    // Interpolation weights
+    FIELD3D_VEC3_T<double> f1, f2;
 
-    // Lower left corner
-    V3i c1(static_cast<int>(floor(p.x)),
-           static_cast<int>(floor(p.y)),
-           static_cast<int>(floor(p.z)));
-    // Upper right corner
-    V3i c2(c1 + V3i(1));
-    // C1 fractions
-    FIELD3D_VEC3_T<double> f1(static_cast<FIELD3D_VEC3_T<double> >(c2) - p);
-    // C2 fraction
-    FIELD3D_VEC3_T<double> f2(static_cast<FIELD3D_VEC3_T<double> >(1.0) - f1);
-
-    const Box3i &dataWindow = field.dataWindow();
-
-    // Clamp the coordinates
-    c1.x = std::min(dataWindow.max.x, std::max(dataWindow.min.x, c1.x));
-    c1.y = std::min(dataWindow.max.y, std::max(dataWindow.min.y, c1.y));
-    c1.z = std::min(dataWindow.max.z, std::max(dataWindow.min.z, c1.z));
-    c2.x = std::min(dataWindow.max.x, std::max(dataWindow.min.x, c2.x));
-    c2.y = std::min(dataWindow.max.y, std::max(dataWindow.min.y, c2.y));
-    c2.z = std::min(dataWindow.max.z, std::max(dataWindow.min.z, c2.z));
+    getLerpInfo(vsP, field.dataWindow(), f1, f2, c1, c2);
 
     // Determine which block we're in
     int i = c1.x, j = c1.y, k = c1.z, vi, vj, vk, bi, bj, bk;
@@ -256,10 +240,13 @@ struct SparseBlock : boost::noncopyable
   { return data[(k << blockOrder << blockOrder) + (j << blockOrder) + i]; }
 
   //! Alloc data
-  void resize(int n)
+  void resize(int n, bool enforceThreadSafety = true)
   {
     // First hold lock
-    boost::mutex::scoped_lock lock(ms_resizeMutex);
+    boost::mutex::scoped_lock lock(ms_resizeMutex, boost::defer_lock);
+    if (enforceThreadSafety) {
+      lock.lock();
+    }
     // Perform work
     if (data) {
       delete[] data;
@@ -270,10 +257,13 @@ struct SparseBlock : boost::noncopyable
   }
 
   //! Remove data
-  void clear()
+  void clear(bool enforceThreadSafety = true)
   {
     // First hold lock
-    boost::mutex::scoped_lock lock(ms_resizeMutex);
+    boost::mutex::scoped_lock lock(ms_resizeMutex, boost::defer_lock);
+    if (enforceThreadSafety) {
+      lock.lock();
+    }
     // Perform work
     if (data) {
       delete[] data;
@@ -282,18 +272,18 @@ struct SparseBlock : boost::noncopyable
   }
 
   //! Copy data from another block
-  void copy(const SparseBlock &other, size_t n)
+  void copy(const SparseBlock &other, size_t n, bool enforceThreadSafety = true)
   {
     if (other.isAllocated) {
       if (!data) {
-        resize(n);
+        resize(n, enforceThreadSafety);
       }
       Data_T *p = data, *end = data + n, *o = other.data;
       while (p != end) {
         *p++ = *o++;
       }
     } else {
-      clear();
+      clear(enforceThreadSafety);
     }
   }
 
@@ -357,8 +347,9 @@ public:
   typedef boost::intrusive_ptr<SparseField> Ptr;
   typedef std::vector<Ptr> Vec;
 
-  typedef LinearSparseFieldInterp<Data_T> LinearInterp;
+  typedef LinearSparseFieldInterp<Data_T>               LinearInterp;
   typedef CubicGenericFieldInterp<SparseField<Data_T> > CubicInterp;
+  typedef GenericStochasticInterp<SparseField<Data_T> > StochasticInterp;
 
   // RTTI replacement ----------------------------------------------------------
 
@@ -381,7 +372,9 @@ public:
   //! \{
 
   //! Constructs an empty buffer
-  SparseField();
+  //! If enforceThreadSafety is true each block will aquire a lock shared with
+  //! all blocks in this field when allocating or deallocating it's data.
+  explicit SparseField(bool enforceThreadSafety = true);
 
   //! Copy constructor
   SparseField(const SparseField &o);
@@ -437,6 +430,13 @@ public:
   //! \returns Number of released blocks
   template <typename Functor_T>
   int releaseBlocks(Functor_T func);
+
+  //! Releases a single block if the supplied function object returns true.
+  //! See releaseBlocks() above.
+  //! \param func A function object with the method "bool check(SparseBlock&)"
+  //! \returns true if block was released, false otherwise
+  template <typename Functor_T>
+  bool releaseBlock(const size_t idx, Functor_T func); 
 
   //! Calculates the block number based on a block i,j,k index
   int blockId(int blockI, int blockJ, int blockK) const;
@@ -616,6 +616,9 @@ public:
   Block *m_blocks;
   //! Number of blocks in field.
   size_t m_numBlocks;
+
+  //! Whether to lock when allocating and deallocating block data.
+  bool m_enforceThreadSafety;
 
   //! Pointer to SparseFileManager. Used when doing dynamic reading.
   //! NULL if not in use.
@@ -1284,10 +1287,11 @@ private:
 //----------------------------------------------------------------------------//
 
 template <class Data_T>
-SparseField<Data_T>::SparseField()
+SparseField<Data_T>::SparseField(bool enforceThreadSafety)
   : base(),
     m_blockOrder(BLOCK_ORDER),
     m_blocks(NULL),
+    m_enforceThreadSafety(enforceThreadSafety),
     m_fileManager(NULL)
 {
   setupBlocks();
@@ -1300,6 +1304,7 @@ SparseField<Data_T>::SparseField(const SparseField<Data_T> &o)
  : base(o),
    m_blockOrder(o.m_blockOrder),
    m_blocks(NULL),
+   m_enforceThreadSafety(o.m_enforceThreadSafety),
    m_fileManager(o.m_fileManager)
 {
   copySparseField(o);
@@ -1366,8 +1371,10 @@ SparseField<Data_T>::copySparseField(const SparseField<Data_T> &o)
       m_blocks[i].isAllocated = o.m_blocks[i].isAllocated;
       m_blocks[i].emptyValue = o.m_blocks[i].emptyValue;
       m_blocks[i].copy(o.m_blocks[i],
-                       1 << m_blockOrder << m_blockOrder << m_blockOrder);
+                       1 << m_blockOrder << m_blockOrder << m_blockOrder,
+                       m_enforceThreadSafety);
     }
+    m_enforceThreadSafety = o.m_enforceThreadSafety;
     m_fileId = -1;
     m_fileManager = NULL;
   }
@@ -1403,7 +1410,7 @@ void SparseField<Data_T>::copyBlockStates(const SparseField<Data_T> &o)
   for (size_t i = 0; i < m_numBlocks; ++i) {
     m_blocks[i].isAllocated = o.m_blocks[i].isAllocated;
     m_blocks[i].emptyValue = o.m_blocks[i].emptyValue;
-    m_blocks[i].clear();
+    m_blocks[i].clear(m_enforceThreadSafety);
   }
 }
 
@@ -1595,6 +1602,44 @@ int SparseField<Data_T>::releaseBlocks(Functor_T func)
 //----------------------------------------------------------------------------//
 
 template <class Data_T>
+template <typename Functor_T>
+bool SparseField<Data_T>::releaseBlock(const size_t idx, Functor_T func)
+{
+  Data_T emptyValue;
+
+  // If the block is on the edge of the field, it may have unused
+  // voxels, with undefined values.  We need to pass the range of
+  // valid voxels into the check function, so it only looks at valid
+  // voxels.
+  V3i dataRes = FieldRes::dataResolution();
+  V3i validSize;
+  V3i blockAllocSize(blockSize());
+
+  V3i blockCoord = indexToCoord(idx, m_blockRes);
+  validSize = blockAllocSize;
+  if (blockCoord.x == m_blockRes.x-1) {
+    validSize.x = dataRes.x - blockCoord.x * blockAllocSize.x;
+  }
+  if (blockCoord.y == m_blockRes.y-1) {
+    validSize.y = dataRes.y - blockCoord.y * blockAllocSize.y;
+  }
+  if (blockCoord.z == m_blockRes.z-1) {
+    validSize.z = dataRes.z - blockCoord.z * blockAllocSize.z;
+  }
+
+  if (m_blocks[idx].isAllocated) {
+    if (func.check(m_blocks[idx], emptyValue, validSize, blockAllocSize)) {
+      deallocBlock(m_blocks[idx], emptyValue);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+//----------------------------------------------------------------------------//
+
+template <class Data_T>
 Data_T SparseField<Data_T>::value(int i, int j, int k) const
 {
   return fastValue(i, j, k);
@@ -1683,7 +1728,7 @@ Data_T& SparseField<Data_T>::fastLValue(int i, int j, int k)
   } else {
     // ... Otherwise, allocate block
     size_t blockSize = 1 << m_blockOrder << m_blockOrder << m_blockOrder;
-    block.resize(blockSize);
+    block.resize(blockSize, m_enforceThreadSafety);
     return block.value(vi, vj, vk, m_blockOrder);
   }
 }
@@ -1971,7 +2016,7 @@ void SparseField<Data_T>::deallocBlock(Block &block, const Data_T &emptyValue)
 {
   block.isAllocated = false;
   //! Block::clear() deallocates the data
-  block.clear();
+  block.clear(m_enforceThreadSafety);
   block.emptyValue = emptyValue;
 }
 

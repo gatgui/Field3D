@@ -60,6 +60,7 @@
 #include "Field.h"
 #include "Field3DFileHDF5.h"
 #include "FieldMetadata.h"
+#include "FilenameSpec.h"
 #include "ClassFactory.h"
 #include "OgawaFwd.h"
 
@@ -101,6 +102,8 @@ public:
   //! The name of the parent partition. We need this in order to open
   //! its group.
   std::string parent;
+  //! Whether this is a vector layer.
+  bool isVector;
 };
   
 } // namespace File
@@ -163,6 +166,12 @@ public:
   
   //! Gets all the layer names. 
   void getLayerNames(std::vector<std::string> &names) const;
+  
+  //! Gets scalar layer names. 
+  void getScalarLayerNames(std::vector<std::string> &names) const;
+
+  //! Gets vector layer names. 
+  void getVectorLayerNames(std::vector<std::string> &names) const;
 
   //! Returns a reference to the OgOGroup
   OgOGroup& group() const;
@@ -240,6 +249,9 @@ public:
 
   // Main methods --------------------------------------------------------------
 
+  //! Whether the file is empty
+  bool empty() const;
+
   //! Clear the data structures and close the file.
   void clear();
 
@@ -251,14 +263,24 @@ public:
   //! \name Retreiving partition and layer names
   //! \{
 
+  //! Returns the number of partitions for the given name
+  size_t numPartitions(const std::string &name) const;
   //! Gets the names of all the partitions in the file
   void getPartitionNames(std::vector<std::string> &names) const;
   //! Gets the names of all the scalar layers in a given partition
   void getScalarLayerNames(std::vector<std::string> &names, 
                            const std::string &partitionName) const;
+  //! Gets the names of all the scalar layers in a given partition with index
+  void getScalarLayerNames(std::vector<std::string> &names, 
+                           const std::string &partitionName,
+                           const size_t index) const;
   //! Gets the names of all the vector layers in a given partition
   void getVectorLayerNames(std::vector<std::string> &names, 
                            const std::string &partitionName) const;
+  //! Gets the names of all the vector layers in a given partition with index
+  void getVectorLayerNames(std::vector<std::string> &names, 
+                           const std::string &partitionName,
+                           const size_t index) const;
 
   //! \}
 
@@ -430,6 +452,9 @@ public:
   //! \returns Whether successful
   bool open(const std::string &filename);
 
+  //! Convenience method with FilenameSpec
+  bool open(const FilenameSpec &spec);
+
   //! Returns an encoding descriptor of the given file 
   const std::string &encoding() const
   { 
@@ -440,14 +465,38 @@ public:
   //! \name Reading layers from disk
   //! \{
 
+  //! Read layers by attribute name. The provided argument may contain
+  //! wildcards or be empty, but may not contain the ':' character.
   template <class Data_T>
   typename Field<Data_T>::Vec
   readLayers(const std::string &layerName = std::string("")) const;
 
+  //! Read layers by name and attribute. Arguments may not contain 
+  //! wildcards.
   template <class Data_T>
   typename Field<Data_T>::Vec
   readLayers(const std::string &partitionName,
              const std::string &layerName) const;
+
+  template <class Data_T>
+  typename Field<Data_T>::Ptr
+  readLayer(const std::string &partitionName, 
+            const size_t partitionIndex, 
+            const std::string &layerName) const;
+
+  //! Convenience method with FilenameSpec. This version will work both in
+  //! the case of unique and non-unique filename specs.
+  template <class Data_T>
+  typename Field<Data_T>::Vec
+  readLayers(const FilenameSpec &spec) const;
+
+  //! Convenience method with FilenameSpec. This version will work only in
+  //! the case of unique filename specs.
+  template <class Data_T>
+  typename Field<Data_T>::Ptr
+  readLayer(const FilenameSpec &spec) const;
+
+  //! \}
 
   //! \name Backward compatibility
   //! \{
@@ -478,6 +527,18 @@ public:
     return readLayers<Data_T>(partitionName, layerName); 
   }
 
+  //! Reads scalar layer with partition index
+  template <class Data_T>
+  typename Field<Data_T>::Ptr
+  readScalarLayer(const std::string &partitionName, const size_t idx, 
+                  const std::string &layerName) const
+  { 
+    if (m_hdf5) {
+      return m_hdf5->readScalarLayer<Data_T>(partitionName, idx, layerName);
+    }
+    return readLayer<Data_T>(partitionName, idx, layerName); 
+  }
+
   //! Retrieves all the layers of vector type and maintains their on-disk
   //! data types
   //! \param layerName If a string is passed in, only layers of that name will
@@ -504,21 +565,51 @@ public:
     return readLayers<FIELD3D_VEC3_T<Data_T> >(partitionName, layerName); 
   }
 
+  //! Reads vector layer with partition index
+  template <class Data_T>
+  typename Field<FIELD3D_VEC3_T<Data_T> >::Ptr
+  readVectorLayer(const std::string &partitionName, const size_t idx, 
+                  const std::string &layerName) const
+  { 
+    if (m_hdf5) {
+      return m_hdf5->readVectorLayer<Data_T>(partitionName, idx, layerName);
+    }
+    return readLayer<FIELD3D_VEC3_T<Data_T> >(partitionName, idx, layerName); 
+  }
+
   //! \}
 
   //! \name Reading proxy data from disk
   //! \{
 
-  //! Retrieves a proxy version (EmptyField) of each layer .
+  //! Retrieves a proxy version (EmptyField) of each layer.
   //! \note Although the call is templated, all fields are read, regardless
   //! of bit depth.
-  //! \param name If a string is passed in, only layers of that name will
-  //! be read from disk.
   template <class Data_T>
   typename EmptyField<Data_T>::Vec
-  readProxyLayer(const std::string &partitionName, 
+  readProxyLayers(const std::string &partitionName, 
                  const std::string &layerName, 
                  bool isVectorLayer) const;
+
+  //! Retrieves a proxy version (EmptyField) of a specific layer.
+  //! \note Although the call is templated, any field will be read, regardless
+  //! of bit depth.
+  template <class Data_T>
+  typename EmptyField<Data_T>::Ptr
+  readProxyLayer(const std::string &partitionName, 
+                 const size_t idx, 
+                 const std::string &layerName, 
+                 bool isVectorLayer) const;
+
+  //! Convenience method using FilenameSpec
+  template <class Data_T>
+  typename EmptyField<Data_T>::Vec
+  readProxyLayers(const FilenameSpec &spec, bool isVectorLayer) const; 
+
+  //! Convenience method using FilenameSpec
+  template <class Data_T>
+  typename EmptyField<Data_T>::Ptr
+  readProxyLayer(const FilenameSpec &spec, bool isVectorLayer) const; 
 
   //! Retrieves a proxy version (EmptyField) of each scalar layer 
   //! \note Although the call is templated, all fields are read, regardless
