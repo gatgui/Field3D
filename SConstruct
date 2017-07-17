@@ -8,6 +8,8 @@ from excons.tools import boost
 from excons.tools import dl
 from excons.tools import zlib
 
+excons.InitGlobals()
+
 # FIELD3D_STATIC
 
 defs = []
